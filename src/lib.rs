@@ -2,6 +2,52 @@ mod ghost_cell;
 
 pub use ghost_cell::{GhostCell, GhostToken};
 pub use generativity::{make_guard, Guard};
+
+/// GhostCell doesn't know about field project.
+/// on a technicality this is no problem for these examples, since all signatures can just be extended to transitively
+/// have lifetime parameters for all fields of the structure. However besides the obvious ergonomic issues with this,
+/// it also doesnt support recursion correctly.
+/// 
+/// and the ergonomic issue is a real one: so here are a couple casts I've added. I believe they seem reasonable!
+/// but please inspect them carefully. very curious to know any issues anyone finds.
+
+/// This is quite a cool rule if true, but definitely needs to be more
+/// thoroughly inspected.
+/// "when the r region contains r2, any object that can be accessed via 'r2 can be accessed via 'r"
+/// this is used below for the union of groups.
+fn entity_cast_group_mut<'r, 'r2, 'a>(
+    x: &GhostCell<'r, &mut GhostToken<'r2>>,
+    r: &'a mut Entity<'r2>,
+) -> &'a mut Entity<'r> {
+    unsafe {
+        &mut *(r as *mut _ as *mut _)
+    }
+}
+/// You can see the definition of `OpenEntity` below. the intention is that these types are derived from every struct.
+/// here we make the claim that a GhostToken can be projected to the ghost tokens for every field of a type,
+/// where the function return rule is effectively implementing an existential: With system F, we'd give `Entity`
+/// an existential for the lifetimes on each field, and this function is opening it.
+/// 
+/// *definitely* suspicious of this particular signature. Does it make sense that the return lifetimes are unbound?
+/// `OpenEntity` makes then invariant, and we're confident in the uniqueness of `'r`, so this is splitting
+/// into exactly 5 ids? Generativity in rust is confusing, this might allow them to unify w something bad.
+fn token_as_entity1_mut<'r, 'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy, 'a>(t: &'a mut GhostToken<'r>) -> 
+    (&'a mut EntityAccess<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy>,
+    impl for<'b> Fn(&'b Entity<'r>) -> &'b OpenEntity<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy> + 'r
+    ) {
+    (unsafe {
+        &mut *(t as *mut _ as *mut _)
+    },
+    // no captures ==> this is a zst
+    move |e| unsafe {
+        &*(e as *const _ as *const _)
+    }
+    )
+}
+
+
+
+
 fn example() {
     let my_list: Vec<i64> = vec![1, 2, 3, 4];
     // "every variable introduces a group:"
@@ -71,22 +117,6 @@ struct EntityAccess<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy> 
     pub energy: GhostToken<'energy>,
 }
 
-// *definitely* suspicious of this one. Does it make sense that the return lifetimes are unbound?
-// `OpenEntity` makes then invariant, and we're confident in the uniqueness of `'r`, so this is splitting
-// into exactly 5 ids? Generativity in rust is confusing, this might allow them to unify w something bad.
-fn token_as_entity1_mut<'r, 'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy, 'a>(t: &'a mut GhostToken<'r>) -> 
-    (&'a mut EntityAccess<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy>,
-    impl for<'b> Fn(&'b Entity<'r>) -> &'b OpenEntity<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy> + 'r
-    ) {
-    (unsafe {
-        &mut *(t as *mut _ as *mut _)
-    },
-    // no captures ==> this is a zst
-    move |e| unsafe {
-        &*(e as *const _ as *const _)
-    }
-    )
-}
 impl<'r> Entity<'r> {
     pub fn new() -> Self {
         todo!()
@@ -209,16 +239,6 @@ fn attack4<'r>(a: &Entity<'r>, d: &Entity<'r>, token: &mut GhostToken<'r>) {
     println!("{:?}", rings_list_ref.borrow(&token).len());
     // println!("{:?}", ring_ref.borrow(&token).power);
     // println!("{:?}", durability);
-}
-/// This is quite a cool rule if true, but definitely needs to be more
-/// thoroughly inspected.
-fn entity_cast_group_mut<'r, 'r2, 'a>(
-    x: &GhostCell<'r, &mut GhostToken<'r2>>,
-    r: &'a mut Entity<'r2>,
-) -> &'a mut Entity<'r> {
-    unsafe {
-        &mut *(r as *mut _ as *mut _)
-    }
 }
 // fn union_groups<'r>(a: &mut GhostToken<'a>, b: &mut GhostToken<'b>, r: GhostToken<'r>) ->  {
 //     GhostToken::new(id)
