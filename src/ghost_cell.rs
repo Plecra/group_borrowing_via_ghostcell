@@ -73,7 +73,7 @@ So I'm gonna say the license holder is "MPI-SWS" in lieu of it being specified.
 // pub mod list_arena;
 // pub mod dfs_arena_list;
 use core::{cell::UnsafeCell, marker::PhantomData};
-type InvariantLifetime<'brand> = PhantomData<fn(&'brand ()) -> &'brand ()>;
+pub type InvariantLifetime<'brand> = generativity::Guard<'brand>;
 /// A ghost token.
 ///
 /// Once created, a `GhostToken` can neither be cloned nor copied.
@@ -96,29 +96,31 @@ type InvariantLifetime<'brand> = PhantomData<fn(&'brand ()) -> &'brand ()>;
 // pub struct GhostToken<'id> {
 //     _marker: InvariantLifetime<'id>,
 // }
-pub type GhostToken<'a> = generativity::Guard<'a>;
+// GhostToken are always instantiated with a Guard<'id>, but we rely on the generic
+// parameter to allow traits to carry "associated lifetimes"
+pub type GhostToken<r> = PhantomData<r>;
 /// A ghost cell.
 ///
 /// A `GhostCell` acts exactly like a `T`, except that its contents are
 /// accessible only through its owning `GhostToken`.
 #[derive(Default)]
 #[repr(transparent)]
-pub struct GhostCell<'id, T: ?Sized> {
-    _marker: InvariantLifetime<'id>,
+pub struct GhostCell<C, T: ?Sized> {
+    _marker: PhantomData<C>,
     value: UnsafeCell<T>, // invariant in `T`
 }
 /// `GhostCell<'id, T>` implements `Send` iff `T` does. This is safe because in
 /// order to access the `T` mutably within a `GhostCell<T>`, you need both a
 /// mutable reference to its owning `GhostToken` and an immutable reference to
 /// `GhostCell<T>`, and both references must have the same lifetime.
-unsafe impl<'id, T> Send for GhostCell<'id, T> where T: Send {}
+unsafe impl<C, T> Send for GhostCell<C, T> where T: Send {}
 /// `GhostCell<'id, T>` implements `Sync` iff `T` is `Send + Sync`. This is safe
 /// because in order to access the `T` immutably within a `GhostCell<T>`, you
 /// need both an immutable reference to its owning `GhostToken` and an immutable
 /// reference to `GhostCell<T>`, and both references must have the same lifetime.
-unsafe impl<'id, T> Sync for GhostCell<'id, T> where T: Send + Sync {}
+unsafe impl<C, T> Sync for GhostCell<C, T> where T: Send + Sync {}
 
-impl<'id, T> GhostCell<'id, T> {
+impl<'id, T> GhostCell<InvariantLifetime<'id>, T> {
     /// Creates a new cell that belongs to the token at lifetime `'id`. This
     /// consumes the value of type `T`. From this point on, the only way to access
     /// the inner value is by using a `GhostToken` with the same `'id`. Since
@@ -206,7 +208,7 @@ impl<'id, T> GhostCell<'id, T> {
     /// Get an immutable reference to the item that lives for as long as the
     /// owning token is immutably borrowed (the lifetime `'a`).
     #[inline]
-    pub fn borrow<'a>(&'a self, _token: &'a GhostToken<'id>) -> &'a T {
+    pub fn borrow<'a>(&'a self, _token: &'a InvariantLifetime<'id>) -> &'a T {
         unsafe {
             // We know the token and lifetime are both borrowed at 'a, and the
             // token is borrowed immutably; therefore, nobody has a mutable
@@ -221,7 +223,7 @@ impl<'id, T> GhostCell<'id, T> {
     /// Get a mutable reference to the item that lives for as long as the owning
     /// token is mutably borrowed.
     #[inline]
-    pub fn borrow_mut<'a>(&'a self, _token: &'a mut GhostToken<'id>) -> &'a mut T {
+    pub fn borrow_mut<'a>(&'a self, _token: &'a mut InvariantLifetime<'id>) -> &'a mut T {
         unsafe {
             // We know the token and lifetime are both borrowed at `'a`, and the
             // token is borrowed mutably; therefore, nobody else has a mutable 
@@ -234,13 +236,13 @@ impl<'id, T> GhostCell<'id, T> {
         }
     }
 }
-impl<'id, T> From<T> for GhostCell<'id, T> {
+impl<'id, T> From<T> for GhostCell<InvariantLifetime<'id>, T> {
     #[inline]
     fn from(t: T) -> Self {
         GhostCell::new(t)
     }
 }
-impl<'id, T: ?Sized> GhostCell<'id, T> {
+impl<'id, T: ?Sized> GhostCell<InvariantLifetime<'id>, T> {
     /// Returns a raw pointer to the underlying data in this cell.
     pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
@@ -260,22 +262,22 @@ impl<'id, T: ?Sized> GhostCell<'id, T> {
 
     }
 }
-impl<'id, T> GhostCell<'id, [T]> {
+impl<'id, T> GhostCell<InvariantLifetime<'id>, [T]> {
     /// Returns a `&[GhostCell<'id, T>]` from a `&GhostCell<'id, [T]>`
     #[inline]
-    pub fn as_slice_of_cells(&self) -> &[GhostCell<'id, T>] {
-        unsafe { &*(self as *const GhostCell<'id, [T]> as *const [GhostCell<'id, T>]) }
+    pub fn as_slice_of_cells(&self) -> &[GhostCell<InvariantLifetime<'id>, T>] {
+        unsafe { &*(self as *const GhostCell<InvariantLifetime<'id>, [T]> as *const [GhostCell<InvariantLifetime<'id>, T>]) }
     }
 }
-impl<'id, T: Clone> GhostCell<'id, T> {
+impl<'id, T: Clone> GhostCell<InvariantLifetime<'id>, T> {
     /// Convenience method to clone the `GhostCell` when `T` is `Clone`, as long
     /// as the token is available.
     #[inline]
-    pub fn clone(&self, token: &GhostToken<'id>) -> Self {
+    pub fn clone(&self, token: &InvariantLifetime<'id>) -> Self {
         GhostCell::new(self.borrow(token).clone())
     }
 }
-impl<'id, T: ?Sized> AsMut<T> for GhostCell<'id, T> {
+impl<'id, T: ?Sized> AsMut<T> for GhostCell<InvariantLifetime<'id>, T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         self.get_mut()
