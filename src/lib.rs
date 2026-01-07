@@ -36,18 +36,56 @@ fn example_2() {
     // list_ref.borrow_mut(&mut my_list_group).push(5);
     println!("{:?}", el_ref)
 }
+// Really these should all also be using GhostCell for the fields,
+// but for the sake of the demo I'll just use plain old data.
 #[derive(Debug)]
 pub struct Ring {
     pub power: u32,
 }
-pub enum Hand {
-    Shield { durability: u32 },
+pub enum Hand<'content> {
+    Shield {
+        durability: GhostCell<'content, u32>,
+    },
     Sword { sharpness: u32 },
 }
+#[repr(C)]
 pub struct Entity<'content> {
     pub hp: GhostCell<'content, u32>,
     pub rings: GhostCell<'content, Vec<GhostCell<'content, Ring>>>,
-    pub hand: GhostCell<'content, Hand>,
+    pub hand: GhostCell<'content, Hand<'content>>,
+    pub energy: GhostCell<'content, i32>,
+}
+#[repr(C)]
+pub struct OpenEntity<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy> {
+    pub hp: GhostCell<'hp, u32>,
+    pub rings: GhostCell<'rings, Vec<GhostCell<'rings_content, Ring>>>,
+    pub hand: GhostCell<'hand, Hand<'hand_content>>,
+    pub energy: GhostCell<'energy, u32>,
+}
+struct EntityAccess<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy> {
+    pub hp: GhostToken<'hp>,
+    pub rings: GhostToken<'rings>,
+    pub rings_content: GhostToken<'rings_content>,
+    pub hand: GhostToken<'hand>,
+    pub hand_content: GhostToken<'hand_content>,
+    pub energy: GhostToken<'energy>,
+}
+
+// *definitely* suspicious of this one. Does it make sense that the return lifetimes are unbound?
+// `OpenEntity` makes then invariant, and we're confident in the uniqueness of `'r`, so this is splitting
+// into exactly 5 ids? Generativity in rust is confusing, this might allow them to unify w something bad.
+fn token_as_entity1_mut<'r, 'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy, 'a>(t: &'a mut GhostToken<'r>) -> 
+    (&'a mut EntityAccess<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy>,
+    impl for<'b> Fn(&'b Entity<'r>) -> &'b OpenEntity<'hp, 'rings, 'rings_content, 'hand, 'hand_content, 'energy> + 'r
+    ) {
+    (unsafe {
+        &mut *(t as *mut _ as *mut _)
+    },
+    // no captures ==> this is a zst
+    move |e| unsafe {
+        &*(e as *const _ as *const _)
+    }
+    )
 }
 impl<'r> Entity<'r> {
     pub fn new() -> Self {
@@ -109,15 +147,6 @@ pub fn attack2<'r>(a: &Entity<'r>, d: &Entity<'r>, token: &mut GhostToken<'r>) {
     println!("{:?}", hp.borrow(&token));
     // println!("{:?}", ring_ref);
 }
-// struct Entity1Access<'hp, 'rings> {
-//     token: GhostToken<'hp>,
-//     rings: GhostToken<'rings>,
-// }
-// fn token_as_entity1_mut<'r, 'hp, 'rings, 'a>(t: &'a mut GhostToken<'r>, hp: GhostToken<'hp>, rings: GhostToken<'rings>) -> &'a mut Entity1Access<'hp, 'rings> {
-//     unsafe {
-//         &mut *(t as *mut _ as *mut _)
-//     }
-// }
 
 fn attack3<'r>(a: &Entity<'r>, d: &Entity<'r>, token: &mut GhostToken<'r>) {
     let hp_ref = &d.hp;
@@ -136,7 +165,7 @@ fn attack3<'r>(a: &Entity<'r>, d: &Entity<'r>, token: &mut GhostToken<'r>) {
     println!("{:?}", hp_ref.borrow(&token));
     println!("{:?}", rings_list_ref.borrow(&token).len());
     println!("{:?}", ring_ref.borrow(&token).power);
-    println!("{:?}", durability);
+    println!("{:?}", durability.borrow(&token));
 }
 /// ```compile_fail
 /// use demo::{GhostToken, Entity, Hand};
@@ -248,4 +277,60 @@ fn complex_example_main() {
         entities.borrow(&entities_group)[1].borrow(&entities_content_group),
         &mut entity_content_group
     );
+}
+//fn attack[mut r: group Entity](
+//    ref[r] a: Entity,
+//    ref[r] d: Entity):
+//  ref armor_ref = a.armor # Ref to a's armor
+//
+//  # Modifies a.rings' contents
+//  power_up_ring(a, a.rings[0])
+//
+//  # Valid, compiler knows we only modified a.rings' contents
+//  armor_ref.hardness += 2
+fn complex_attack<'r>(a: &Entity<'r>, d: &Entity<'r>, token: &mut GhostToken<'r>) {
+    let (entity_access, entity_cast) = token_as_entity1_mut(token);
+    let open_a = entity_cast(a);
+    let armor_ref = match open_a.hand.borrow(&entity_access.hand) {
+        Hand::Shield { durability } => {
+            durability
+        }
+        Hand::Sword { sharpness } => {
+            panic!("irrelevant to the demo :)");
+        }
+    };
+
+    complex_power_up_ring(
+        open_a, 
+        open_a.rings.borrow(&entity_access.rings)[0].borrow_mut(&mut entity_access.rings_content),
+        &entity_access.hp,
+        &entity_access.rings,
+        // &entity_access.rings_content,
+        &entity_access.hand,
+        &entity_access.hand_content,
+        &entity_access.energy,
+    );
+    *armor_ref.borrow_mut(&mut entity_access.hand_content) += 2;
+}
+// # Wielder Entity's energy will power up the ring.
+// # Changes the ring, but does not change the wielder Entity.
+// fn complex_power_up_ring[e: group Entity, mut rr: group Ring = e.rings*](
+//     ref[e] entity: Entity,
+//     ref[rr] a_ring: Ring
+// ):
+fn complex_power_up_ring<'l1, 'l2, 'rings_content, 'l3, 'l4, 'l5>(
+    entity: &OpenEntity<'l1, 'l2, 'rings_content, 'l3, 'l4, 'l5>,
+    a_ring: &'rings_content mut Ring,
+
+    // So rust can't reason about borrows already existing in the sigature
+    // - e.rings is lovely - but we can mimic it by just exhaustively listing
+    // the disjunction
+    token1: &GhostToken<'l1>,
+    token2: &GhostToken<'l2>,
+    token3: &GhostToken<'l3>,
+    token4: &GhostToken<'l4>,
+    token5: &GhostToken<'l5>,
+
+) {
+    a_ring.power += entity.energy.borrow(token5) / 4
 }
